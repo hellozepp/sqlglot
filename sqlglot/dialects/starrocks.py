@@ -120,6 +120,8 @@ class StarRocks(MySQL):
             return unnest
 
     class Generator(MySQL.Generator):
+        EXCEPT_INTERSECT_SUPPORT_ALL_CLAUSE = False
+
         CAST_MAPPING = {}
 
         TYPE_MAPPING = {
