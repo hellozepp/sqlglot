@@ -5369,6 +5369,11 @@ class Explode(Func):
     is_var_len_args = True
 
 
+# https://spark.apache.org/docs/latest/api/sql/#inline
+class Inline(Func):
+    pass
+
+
 class ExplodeOuter(Explode):
     pass
 
