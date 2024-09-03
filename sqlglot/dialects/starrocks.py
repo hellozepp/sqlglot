@@ -16,15 +16,20 @@ from sqlglot.helper import seq_get
 from sqlglot.tokens import TokenType
 
 
+def _property_sql(self: MySQL.Generator, expression: exp.Property) -> str:
+    # [PROPERTIES (['key1'='value1', 'key2'='value2', ...])]
+    return f"{self.property_name(expression, string_key=True)}={self.sql(expression, 'value')}"
+
+
 class StarRocks(MySQL):
+    STRICT_JSON_PATH_SYNTAX = False
+
     class Tokenizer(MySQL.Tokenizer):
         KEYWORDS = {
             **MySQL.Tokenizer.KEYWORDS,
-            "DECIMAL64": TokenType.DECIMAL,
-            "DECIMAL128": TokenType.BIGDECIMAL,
-            "DISTRIBUTED BY HASH": TokenType.DISTRIBUTE_BY,
-            "DISTRIBUTED BY RANDOM": TokenType.DISTRIBUTE_BY,
-            "DUPLICATE KEY": TokenType.DUPLICATE_KEY,
+            "DECIMAL32": TokenType.DECIMAL32,
+            "DECIMAL64": TokenType.DECIMAL64,
+            "DECIMAL128": TokenType.DECIMAL128,
         }
 
     class Parser(MySQL.Parser):
@@ -42,11 +47,8 @@ class StarRocks(MySQL):
 
         PROPERTY_PARSERS = {
             **MySQL.Parser.PROPERTY_PARSERS,
-            "DISTRIBUTED BY HASH": lambda self: self._parse_distributed_by("HASH"),
-            "DISTRIBUTED BY RANDOM": lambda self: self._parse_distributed_by("RANDOM"),
-            "PROPERTIES": lambda self: self._parse_wrapped_csv(self._parse_property),
-            "DUPLICATE KEY": lambda self: self._parse_duplicate(),
-            "PARTITION BY": lambda self: self._parse_partitioned_by(),
+            "DISTRIBUTED": lambda self: self._parse_distributed_property(),
+            "DUPLICATE": lambda self: self._parse_duplicate(),
         }
 
         def _parse_create(self) -> exp.Create | exp.Command:
@@ -73,32 +75,34 @@ class StarRocks(MySQL):
 
             return create
 
-        def _parse_distributed_by(self, type: str) -> exp.Expression:
+        def _parse_distributed_property(self) -> exp.Expression:
+            type: t.Optional[str] = None
+            if self._match_text_seq("BY", "HASH"):
+                type = "HASH"
+            elif self._match_text_seq("BY", "RANDOM"):
+                type = "RANDOM"
+
             expressions = self._parse_wrapped_csv(self._parse_id_var)
 
             # If the BUCKETS keyword not present, the number of buckets is AUTO
             # [ BUCKETS AUTO | BUCKETS <number> ]
-            buckets = None
-            if self._match_text_seq("BUCKETS", "AUTO"):
-                pass
-            elif self._match_text_seq("BUCKETS"):
+            buckets: t.Optional[exp.Expression] = None
+            if self._match_text_seq("BUCKETS") and not self._match_text_seq("AUTO"):
                 buckets = self._parse_number()
 
-            if self._match_text_seq("ORDER BY"):
-                order_by = self._parse_wrapped_csv(self._parse_ordered)
-            else:
-                order_by = None
-
             return self.expression(
-                exp.DistributedByHash if type == "HASH" else exp.DistributedByRandom,
+                exp.DistributedByHashProperty
+                if type == "HASH"
+                else exp.DistributedByRandomProperty,
                 expressions=expressions,
                 buckets=buckets,
-                sorted_by=order_by,
+                order=self._parse_order(skip_order_token=self._match(TokenType.ORDER_BY)),
             )
 
-        def _parse_duplicate(self) -> exp.DuplicateKey:
+        def _parse_duplicate(self) -> exp.DuplicateKeyProperty:
+            self._match_text_seq("KEY")
             expressions = self._parse_wrapped_csv(self._parse_id_var, optional=False)
-            return self.expression(exp.DuplicateKey, expressions=expressions)
+            return self.expression(exp.DuplicateKeyProperty, expressions=expressions)
 
         def _parse_unnest(self, with_alias: bool = True) -> t.Optional[exp.Unnest]:
             unnest = super()._parse_unnest(with_alias=with_alias)
@@ -121,6 +125,9 @@ class StarRocks(MySQL):
 
     class Generator(MySQL.Generator):
         EXCEPT_INTERSECT_SUPPORT_ALL_CLAUSE = False
+        JSON_TYPE_REQUIRED_FOR_EXTRACTION = False
+        PARSE_JSON_NAME: t.Optional[str] = "PARSE_JSON"
+        WITH_PROPERTIES_PREFIX = "PROPERTIES"
 
         CAST_MAPPING = {}
 
@@ -133,10 +140,10 @@ class StarRocks(MySQL):
 
         PROPERTIES_LOCATION = {
             **MySQL.Generator.PROPERTIES_LOCATION,
-            exp.DistributedByHash: exp.Properties.Location.POST_SCHEMA,
-            exp.DistributedByRandom: exp.Properties.Location.POST_SCHEMA,
-            exp.DuplicateKey: exp.Properties.Location.POST_SCHEMA,
-            exp.PrimaryKey: exp.Properties.Location.UNSUPPORTED,
+            exp.DistributedByHashProperty: exp.Properties.Location.POST_SCHEMA,
+            exp.DistributedByRandomProperty: exp.Properties.Location.POST_SCHEMA,
+            exp.DuplicateKeyProperty: exp.Properties.Location.POST_SCHEMA,
+            exp.PrimaryKey: exp.Properties.Location.POST_SCHEMA,
         }
 
         TRANSFORMS = {
@@ -148,6 +155,7 @@ class StarRocks(MySQL):
             ),
             exp.JSONExtractScalar: arrow_json_extract_sql,
             exp.JSONExtract: arrow_json_extract_sql,
+            exp.Property: _property_sql,
             exp.RegexpLike: rename_func("REGEXP"),
             exp.StrToUnix: lambda self, e: self.func("UNIX_TIMESTAMP", e.this, self.format_time(e)),
             exp.TimestampTrunc: lambda self, e: self.func("DATE_TRUNC", unit_to_str(e), e.this),
@@ -156,34 +164,22 @@ class StarRocks(MySQL):
             exp.UnixToTime: rename_func("FROM_UNIXTIME"),
         }
 
-        def duplicatekey_sql(self, expression: exp.DuplicateKey) -> str:
-            expressions = self.expressions(expression, flat=True)
-            options = self.expressions(expression, key="options", flat=True, sep=" ")
-            options = f" {options}" if options else ""
-            return f"DUPLICATE KEY ({expressions}){options}"
+        def create_sql(self, e: exp.Create) -> str:
+            # Starrocks's primary is defined outside the schema, so we need to move it into the schema
+            schema = e.this
+            if isinstance(schema, exp.Schema):
+                primary_key = next(
+                    (expr for expr in schema.expressions if isinstance(expr, exp.PrimaryKey)),
+                    None,
+                )
+                if primary_key:
+                    schema.expressions.remove(primary_key)
+                    props = e.args.get("properties")
+                    if props:
+                        props.expressions.insert(0, primary_key)
+                    else:
+                        e.set("properties", exp.Properties(expressions=[primary_key]))
 
-        def distributedbyhash_sql(self, expression: exp.DistributedByHash) -> str:
-            expressions = self.expressions(expression, key="expressions", flat=True)
-            sorted_by = self.expressions(expression, key="sorted_by", flat=True)
-            sorted_by = f" ORDER BY ({sorted_by})" if sorted_by else ""
-            buckets = self.sql(expression, "buckets")
-            if expression.auto_bucket:
-                buckets = "AUTO"
-            return f"DISTRIBUTED BY HASH ({expressions}) BUCKETS {buckets}{sorted_by}"
-
-        def distributedbyrandom_sql(self, expression: exp.DistributedByRandom) -> str:
-            expressions = self.expressions(expression, flat=True)
-            sorted_by = self.expressions(expression, key="sorted_by", flat=True)
-            sorted_by = f" ORDER BY ({sorted_by})" if sorted_by else ""
-            buckets = self.sql(expression, "buckets")
-            if expression.auto_bucket:
-                buckets = "AUTO"
-            return f"DISTRIBUTED BY RANDOM ({expressions}) BUCKETS {buckets}{sorted_by}"
-
-        def property_name(self, expression: exp.Property, string_key: bool = False) -> str:
-            return super().property_name(expression, True)
-
-        def with_properties(self, properties: exp.Properties) -> str:
-            return self.properties(properties, prefix=self.seg("PROPERTIES", sep=""))
+            return super().create_sql(e)
 
         TRANSFORMS.pop(exp.DateTrunc)

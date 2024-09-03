@@ -506,6 +506,7 @@ class Hive(Dialect):
             exp.DateSub: _add_date_sql,
             exp.DateToDi: lambda self,
             e: f"CAST(DATE_FORMAT({self.sql(e, 'this')}, {Hive.DATEINT_FORMAT}) AS INT)",
+            exp.DistributedByHashProperty: lambda self, e:self.distributedbyhash_sql(e),
             exp.DiToDate: lambda self,
             e: f"TO_DATE(CAST({self.sql(e, 'this')} AS STRING), {Hive.DATEINT_FORMAT})",
             exp.FileFormatProperty: lambda self,
@@ -600,9 +601,9 @@ class Hive(Dialect):
 
         PROPERTIES_LOCATION = {
             **generator.Generator.PROPERTIES_LOCATION,
-            exp.DistributedByHash: exp.Properties.Location.POST_SCHEMA,
-            exp.DistributedByRandom: exp.Properties.Location.UNSUPPORTED,
-            exp.DuplicateKey: exp.Properties.Location.UNSUPPORTED,
+            exp.DistributedByHashProperty: exp.Properties.Location.POST_SCHEMA,
+            exp.DistributedByRandomProperty: exp.Properties.Location.UNSUPPORTED,
+            exp.DuplicateKeyProperty: exp.Properties.Location.UNSUPPORTED,
             exp.EngineProperty: exp.Properties.Location.UNSUPPORTED,
             exp.FileFormatProperty: exp.Properties.Location.POST_SCHEMA,
             exp.PartitionedByProperty: exp.Properties.Location.POST_SCHEMA,
@@ -612,7 +613,7 @@ class Hive(Dialect):
         }
 
         # https://cwiki.apache.org/confluence/display/Hive/LanguageManual+DDL
-        def distributedbyhash_sql(self, expression: exp.DistributedByHash) -> str:
+        def distributedbyhash_sql(self, expression: exp.DistributedByHashProperty) -> str:
             expressions = self.expressions(expression, key="expressions", flat=True)
             sorted_by = self.expressions(expression, key="sorted_by", flat=True)
             sorted_by = f" SORTED BY ({sorted_by})" if sorted_by else ""
@@ -746,9 +747,7 @@ class Hive(Dialect):
                     # In versions earlier than StarRocks 2.1 and doris 3.0, the value range of M is [1, 65533].
                     # https://docs.starrocks.io/docs/sql-reference/data-types/string-type/VARCHAR/
                     return "STRING" if size > 65533 else super().datatype_sql(expression)
-            dialect = root_expression.args["dialect"]
-            if dialect in ("MYSQL", "STARROCKS", "DORIS"):
-                return self.doris_or_sr_type_to_hive(expression)
+            self.doris_or_sr_type_to_hive(expression)
 
             return super().datatype_sql(expression)
 

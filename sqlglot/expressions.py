@@ -1396,7 +1396,6 @@ class Create(DDL):
         "clone": False,
         "concurrently": False,
         "clustered": False,
-        "dialect": False,
     }
 
     @property
@@ -2056,23 +2055,6 @@ class Credentials(Expression):
     }
 
 
-class DistributedByHash(Expression):
-    arg_types = {"expressions": True, "buckets": False, "sorted_by": False}
-
-    @property
-    def auto_bucket(self) -> bool:
-        return self.args.get("buckets") is None
-
-
-# https://docs.starrocks.io/docs/sql-reference/sql-statements/data-definition/CREATE_TABLE/#distribution_desc
-class DistributedByRandom(DistributedByHash):
-    pass
-
-
-class DuplicateKey(Expression):
-    arg_types = {"expressions": True}
-
-
 class Prior(Expression):
     pass
 
@@ -2621,8 +2603,26 @@ class DistKeyProperty(Property):
     arg_types = {"this": True}
 
 
+# https://docs.starrocks.io/docs/sql-reference/sql-statements/data-definition/CREATE_TABLE/#distribution_desc
+# https://doris.apache.org/docs/sql-manual/sql-statements/Data-Definition-Statements/Create/CREATE-TABLE?_highlight=create&_highlight=table#distribution_desc
+class DistributedByHashProperty(Property):
+    arg_types = {"expressions": True, "buckets": False, "order": False}
+
+
+class DistributedByRandomProperty(Property):
+    arg_types = {"expressions": True, "buckets": False, "order": False}
+
+    @property
+    def auto_bucket(self) -> bool:
+        return self.args.get("buckets") is None
+
+
 class DistStyleProperty(Property):
     arg_types = {"this": True}
+
+
+class DuplicateKeyProperty(Property):
+    arg_types = {"expressions": True}
 
 
 class EngineProperty(Property):
@@ -2955,8 +2955,8 @@ class Properties(Expression):
         "COMMENT": SchemaCommentProperty,
         "DEFINER": DefinerProperty,
         "DISTKEY": DistKeyProperty,
-        "DISTRIBUTED_BY_HASH": DistributedByHash,
-        "DISTRIBUTED_BY_RANDOM": DistributedByRandom,
+        "DISTRIBUTED_BY_HASH": DistributedByHashProperty,
+        "DISTRIBUTED_BY_RANDOM": DistributedByRandomProperty,
         "DISTSTYLE": DistStyleProperty,
         "ENGINE": EngineProperty,
         "EXECUTE AS": ExecuteAsProperty,
@@ -4050,6 +4050,9 @@ class DataType(Expression):
         DATETIME = auto()
         DATETIME64 = auto()
         DECIMAL = auto()
+        DECIMAL32 = auto()
+        DECIMAL64 = auto()
+        DECIMAL128 = auto()
         DOUBLE = auto()
         ENUM = auto()
         ENUM8 = auto()
@@ -4195,6 +4198,9 @@ class DataType(Expression):
         *FLOAT_TYPES,
         Type.BIGDECIMAL,
         Type.DECIMAL,
+        Type.DECIMAL32,
+        Type.DECIMAL64,
+        Type.DECIMAL128,
         Type.MONEY,
         Type.SMALLMONEY,
         Type.UDECIMAL,
